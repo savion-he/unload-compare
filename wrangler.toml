@@ -1,0 +1,7 @@
+name = "unload-compare"
+main = "worker/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "UNLOAD_KV"
+id = "bd7be5a2c5784018a3015801e1e5ac63"   # 填入 wrangler kv:namespace create 返回的 id

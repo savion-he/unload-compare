@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>卸车数据集指标对比工具</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f3; color: #1a1a18; font-size: 14px; line-height: 1.6; }
+  @keyframes bounce { 0%,80%,100%{transform:scale(0.6);opacity:0.4} 40%{transform:scale(1);opacity:1} }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #f1efe8; }
+  ::-webkit-scrollbar-thumb { background: #d3d1c7; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+// ─────────────────────────────────────────────
+// ⚙️  配置：替换为你的 Cloudflare Worker 地址
+// ─────────────────────────────────────────────
+const WORKER_URL = "https://unload-compare.13140015504.workers.dev";
+
+const { useState, useCallback, useEffect } = React;
+
+const FIELD_META = {
+  total_num:               { label: "总数据集数量",       unit: "",  group: "基础", positiveIsGood: null },
+  cycle_times:             { label: "实际执行次数",       unit: "",  group: "基础", positiveIsGood: null },
+  invalid_data_num:        { label: "无效数据量",         unit: "",  group: "基础", positiveIsGood: false },
+  mf_fail_times:           { label: "运动规划失败",       unit: "",  group: "失败", positiveIsGood: false },
+  second_mf_fail_times:    { label: "二次规划失败",       unit: "",  group: "失败", positiveIsGood: false },
+  pp_fail_times:           { label: "抓放组合处理失败",   unit: "",  group: "失败", positiveIsGood: false },
+  timeout_times:           { label: "超时次数",           unit: "",  group: "失败", positiveIsGood: false },
+  task_avg_time:           { label: "任务平均耗时",       unit: "s", group: "耗时", positiveIsGood: false },
+  single_avg_time:         { label: "单次平均耗时",       unit: "s", group: "耗时", positiveIsGood: false },
+  pp_avg_time:             { label: "抓放流程平均耗时",   unit: "s", group: "耗时", positiveIsGood: false },
+  mp_over_pp:              { label: "MP超过PP耗时比",     unit: "",  group: "耗时", positiveIsGood: false },
+  execute_avg_time:        { label: "执行平均耗时",       unit: "s", group: "耗时", positiveIsGood: false },
+  mp_task_worse_times:     { label: "MP任务超时次数",     unit: "",  group: "超时", positiveIsGood: false },
+  mp_single_worse_times:   { label: "MP单次超时次数",     unit: "",  group: "超时", positiveIsGood: false },
+  pp_worse_times:          { label: "PP超时次数",         unit: "",  group: "超时", positiveIsGood: false },
+  collide_times:           { label: "碰撞次数",           unit: "",  group: "质量", positiveIsGood: false },
+  avg_boxes_per_pick:      { label: "每次平均抓取箱数",   unit: "",  group: "质量", positiveIsGood: true  },
+  is_multi_as_possible:    { label: "多抓率",             unit: "",  group: "质量", positiveIsGood: true  },
+  sidepick_pullout_times:  { label: "侧抓拉出次数",       unit: "",  group: "质量", positiveIsGood: null  },
+};
+
+const GROUPS = ["基础","失败","耗时","超时","质量"];
+const CPU_OPTIONS = ["i9-13900K","i9-14900","自定义"];
+const GPU_OPTIONS = ["RTX 4060 Ti","RTX 5060","自定义"];
+const THINKING_STEPS = ["正在读取指标数据...","计算各项变化量...","识别关键改善与退步项...","生成综合分析报告..."];
+const C = { green:"#3B6D11", red:"#A32D2D", gray:"#888780", border:"#d3d1c7", bg:"#f5f5f3", card:"#fff", sub:"#f1efe8", text:"#1a1a18", muted:"#888780", code:"#b4b2a9" };
+
+function parseData(raw) {
+  const result = {};
+  const lines = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length - 1; i++) {
+    const key = lines[i].replace(/-/g, "_");
+    if (FIELD_META[key] !== undefined) {
+      const num = parseFloat(lines[i + 1]);
+      if (!isNaN(num)) { result[key] = num; i++; }
+    }
+  }
+  const full = raw.replace(/\n/g, " ");
+  const tm = full.match(/time[,\s]+([^\n,]+to[^\n,]+)/i);
+  if (tm) result._time = tm[1].trim();
+  const dn = full.match(/dataset_name[,\s]+([^\n,]+)/i);
+  if (dn) result._dataset = dn[1].trim();
+  return result;
+}
+
+function evalTag(delta, meta) {
+  if (!delta || meta.positiveIsGood === null) return "neutral";
+  return (delta > 0) === (meta.positiveIsGood === true) ? "good" : "bad";
+}
+
+function buildLabel(env) {
+  const p = [];
+  if (env.maxVer) p.push(env.maxVer);
+  if (env.mapVer) p.push("标图" + env.mapVer);
+  return p.join(" · ") || "未命名版本";
+}
+function buildHwLabel(env) {
+  const p = [];
+  if (env.cpu) p.push(env.cpu);
+  if (env.gpu) p.push(env.gpu);
+  return p.join(" + ") || "—";
+}
+
+function Tag({ type }) {
+  const m = { good:{bg:"#EAF3DE",color:"#3B6D11",text:"改善"}, bad:{bg:"#FCEBEB",color:"#A32D2D",text:"退步"}, neutral:{bg:"#f1efe8",color:"#888780",text:"持平"} };
+  const s = m[type]||m.neutral;
+  return <span style={{display:"inline-block",fontSize:11,padding:"1px 8px",borderRadius:4,background:s.bg,color:s.color,fontWeight:500}}>{s.text}</span>;
+}
+
+function DeltaCell({ delta, pct, good }) {
+  if (delta===null) return <td style={{textAlign:"right",color:C.code,padding:"8px 12px"}}>—</td>;
+  let color = C.gray;
+  if (delta>0) color = good===true?C.green:good===false?C.red:C.gray;
+  if (delta<0) color = good===false?C.green:good===true?C.red:C.gray;
+  const sign = delta>0?"+":"";
+  const disp = Math.abs(delta)<0.0001?"~0":(Number.isInteger(delta)?delta.toLocaleString():parseFloat(delta.toFixed(4)));
+  const pctD = pct!==null?Math.abs(pct).toFixed(1):null;
+  return (
+    <td style={{textAlign:"right",color,fontWeight:600,padding:"8px 12px",fontVariantNumeric:"tabular-nums"}}>
+      {sign}{disp}{pctD&&<><br/><span style={{fontSize:11,opacity:.85}}>{sign}{pctD}%</span></>}
+    </td>
+  );
+}
+
+function SelectOrInput({ options, value, onChange, placeholder }) {
+  const presets = options.slice(0,-1);
+  const [showCustom, setShowCustom] = useState(!presets.includes(value)&&value!=="");
+  const onSel = e => {
+    if (e.target.value==="自定义"){setShowCustom(true);onChange("");}
+    else{setShowCustom(false);onChange(e.target.value);}
+  };
+  return (
+    <div style={{display:"flex",gap:6,flex:1}}>
+      <select value={showCustom?"自定义":value} onChange={onSel}
+        style={{flex:showCustom?"0 0 110px":1,fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,padding:"4px 8px",outline:"none",background:"#fafaf8",color:C.text,cursor:"pointer"}}>
+        <option value="">请选择</option>
+        {options.map(o=><option key={o} value={o}>{o}</option>)}
+      </select>
+      {showCustom&&<input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        style={{flex:1,fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,padding:"4px 8px",outline:"none",background:"#fafaf8",color:C.text}}/>}
+    </div>
+  );
+}
+
+function Tabs({ tabs, active, onChange }) {
+  return (
+    <div style={{display:"flex",borderBottom:`0.5px solid ${C.border}`,marginBottom:"1.5rem"}}>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>onChange(t.id)} style={{padding:"10px 20px",fontSize:13,border:"none",background:"none",cursor:"pointer",color:active===t.id?C.text:C.muted,fontWeight:active===t.id?500:400,borderBottom:active===t.id?`2px solid ${C.text}`:"2px solid transparent",marginBottom:-1}}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RecordCard({ rec, onDelete, onSelect, selA, selB }) {
+  const isA = selA?.id===rec.id, isB = selB?.id===rec.id;
+  return (
+    <div style={{background:C.card,border:`0.5px solid ${isA||isB?C.border:C.border}`,outline:isA?`2px solid #0F6E56`:isB?`2px solid #185FA5`:"none",borderRadius:10,padding:"12px 14px",position:"relative"}}>
+      <div style={{fontSize:13,fontWeight:500,marginBottom:6,paddingRight:onSelect?160:0}}>{buildLabel(rec.env)}</div>
+      <div style={{display:"grid",gridTemplateColumns:"52px 1fr",gap:"2px 8px",fontSize:12,color:C.muted}}>
+        {rec.env.cpu&&<><span>CPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.cpu}</span></>}
+        {rec.env.gpu&&<><span>GPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.gpu}</span></>}
+        {rec.env.maxVer&&<><span>Max</span><span style={{color:C.text,fontWeight:500}}>{rec.env.maxVer}</span></>}
+        {rec.env.mapVer&&<><span>标图</span><span style={{color:C.text,fontWeight:500}}>{rec.env.mapVer}</span></>}
+        {rec.data._time&&<><span>时间</span><span>{rec.data._time}</span></>}
+        <span>入库</span><span>{rec.savedAt}</span>
+      </div>
+      {onSelect&&(
+        <div style={{position:"absolute",top:10,right:10,display:"flex",gap:6}}>
+          <button onClick={()=>onSelect("A",rec)} style={{fontSize:11,padding:"2px 8px",borderRadius:4,border:`0.5px solid ${isA?"#0F6E56":C.border}`,background:isA?"#E1F5EE":C.card,color:isA?"#0F6E56":C.muted,cursor:"pointer",fontWeight:500}}>
+            {isA?"✓ 基准":"选为基准"}
+          </button>
+          <button onClick={()=>onSelect("B",rec)} style={{fontSize:11,padding:"2px 8px",borderRadius:4,border:`0.5px solid ${isB?"#185FA5":C.border}`,background:isB?"#E6F1FB":C.card,color:isB?"#185FA5":C.muted,cursor:"pointer",fontWeight:500}}>
+            {isB?"✓ 测试":"选为测试"}
+          </button>
+        </div>
+      )}
+      {onDelete&&<button onClick={()=>onDelete(rec.id)} style={{marginTop:8,fontSize:11,color:"#A32D2D",background:"none",border:"none",cursor:"pointer",padding:0}}>删除</button>}
+    </div>
+  );
+}
+
+function Spinner() {
+  return <div style={{width:16,height:16,border:`2px solid ${C.border}`,borderTop:`2px solid ${C.text}`,borderRadius:"50%",animation:"spin 0.8s linear infinite",display:"inline-block"}} />;
+}
+
+// ── Add Panel ──
+function AddPanel({ onSave }) {
+  const [env, setEnv] = useState({cpu:"",gpu:"",maxVer:"",mapVer:""});
+  const [raw, setRaw] = useState("");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  const set = (k,v) => setEnv(p=>({...p,[k]:v}));
+  const inp = (ph,key) => (
+    <input value={env[key]} onChange={e=>set(key,e.target.value)} placeholder={ph}
+      style={{fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,padding:"4px 8px",outline:"none",background:"#fafaf8",color:C.text,width:"100%"}}/>
+  );
+  const save = async () => {
+    const data = parseData(raw);
+    if (Object.keys(data).filter(k=>!k.startsWith("_")).length<3){setErr("数据解析失败，请检查格式");return;}
+    if (!env.maxVer&&!env.mapVer){setErr("请至少填写 Max 版本或标图版本");return;}
+    setErr(""); setSaving(true);
+    try {
+      await onSave({env,data,raw});
+      setEnv({cpu:"",gpu:"",maxVer:"",mapVer:""}); setRaw("");
+    } catch(e){setErr("保存失败："+e.message);}
+    setSaving(false);
+  };
+  return (
+    <div style={{background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,padding:"1.25rem",maxWidth:560}}>
+      <div style={{fontSize:14,fontWeight:500,marginBottom:14}}>新增测试记录</div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6}}>硬件版本</div>
+      <div style={{display:"grid",gridTemplateColumns:"48px 1fr",alignItems:"center",gap:"6px 8px",marginBottom:12}}>
+        <span style={{fontSize:12,color:C.muted}}>CPU</span><SelectOrInput options={CPU_OPTIONS} value={env.cpu} onChange={v=>set("cpu",v)} placeholder="输入 CPU 型号"/>
+        <span style={{fontSize:12,color:C.muted}}>GPU</span><SelectOrInput options={GPU_OPTIONS} value={env.gpu} onChange={v=>set("gpu",v)} placeholder="输入 GPU 型号"/>
+      </div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>软件版本</div>
+      <div style={{display:"grid",gridTemplateColumns:"60px 1fr",alignItems:"center",gap:"6px 8px",marginBottom:12}}>
+        <span style={{fontSize:12,color:C.muted}}>Max 版本</span>{inp("例：1.13.0 pre 52","maxVer")}
+        <span style={{fontSize:12,color:C.muted}}>标图版本</span>{inp("例：20260422","mapVer")}
+      </div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>数据集结果</div>
+      <textarea value={raw} onChange={e=>setRaw(e.target.value)}
+        placeholder={"粘贴数据集指标结果\ntime, 2026-04-22 ...\ntotal_num, 32682\n..."}
+        style={{width:"100%",height:140,fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:8,padding:"8px 10px",resize:"vertical",outline:"none",fontFamily:"'SF Mono','Consolas',monospace",lineHeight:1.6,color:C.text,background:"#fafaf8"}}/>
+      {err&&<div style={{fontSize:12,color:"#A32D2D",marginTop:6}}>{err}</div>}
+      <button onClick={save} disabled={saving}
+        style={{marginTop:12,padding:"8px 24px",background:saving?"#d3d1c7":C.text,color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:saving?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:8}}>
+        {saving&&<Spinner/>}{saving?"保存中...":"保存记录"}
+      </button>
+    </div>
+  );
+}
+
+// ── Compare Panel ──
+function ComparePanel({ records, loading }) {
+  const [selA, setSelA] = useState(null);
+  const [selB, setSelB] = useState(null);
+  const [result, setResult] = useState(null);
+  const [activeGroup, setActiveGroup] = useState("全部");
+  const [aiAnalysis, setAiAnalysis] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiStep, setAiStep] = useState(0);
+
+  const onSelect = (side, rec) => {
+    if (side==="A") setSelA(rec); else setSelB(rec);
+    setResult(null); setAiAnalysis("");
+  };
+
+  const compare = () => { if(selA&&selB){setResult({a:selA.data,b:selB.data});setAiAnalysis("");} };
+
+  const analyze = useCallback(async()=>{
+    if(!result) return;
+    setAiLoading(true); setAiAnalysis(""); setAiStep(0);
+    const timer = setInterval(()=>setAiStep(s=>s<THINKING_STEPS.length-1?s+1:s),800);
+    const la=buildLabel(selA.env),lb=buildLabel(selB.env);
+    const hwA=buildHwLabel(selA.env),hwB=buildHwLabel(selB.env);
+    const sameHw=hwA===hwB||hwA==="—"||hwB==="—";
+    const rows=Object.entries(FIELD_META).map(([k,meta])=>{
+      const va=result.a[k],vb=result.b[k];
+      if(va==null||vb==null) return null;
+      const d=vb-va,pct=va!==0?(d/va*100).toFixed(1):"—";
+      return `${meta.label}(${k}): 基准=${va}, 测试=${vb}, 变化=${d>0?"+":""}${parseFloat(d.toFixed(4))}, 变化率=${pct}%`;
+    }).filter(Boolean).join("\n");
+    const hwNote=sameHw?"两次测试硬件环境一致。":`注意：硬件不同，基准为${hwA}，测试为${hwB}，耗时类指标变化可能受硬件影响。`;
+    const prompt=`你是一位机器人卸车系统性能分析专家。以下是两次数据集测试的指标对比（基准：${la}，测试：${lb}）：\n\n${rows}\n\n${hwNote}\n\n指标说明：mf_fail_times运动规划失败（低好），pp_fail_times抓放失败（低好），pp_avg_time抓放耗时（低好），task_avg_time任务耗时（低好），pp_worse_times PP超时（低好），mp_*_worse_times MP超时（低好），avg_boxes_per_pick每次抓取箱数（高好），is_multi_as_possible多抓率（高好）。\n\n请用中文输出结构化分析报告，包含：1.整体结论（1-2句）2.显著改善项 3.明显退步项 4.需关注问题 5.综合建议。语言简洁专业，用【】代替标题，不要用#。`;
+    try {
+      const res=await fetch(`${WORKER_URL}/analyze`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:[{role:"user",content:prompt}]})});
+      const d=await res.json();
+      clearInterval(timer);
+      setAiAnalysis(d.content?.map(c=>c.text||"").join("")||d.error||"分析失败");
+    } catch(e){clearInterval(timer);setAiAnalysis("请求失败："+e.message);}
+    setAiLoading(false);
+  },[result,selA,selB]);
+
+  const allKeys=Object.keys(FIELD_META);
+  const filteredKeys=activeGroup==="全部"?allKeys:allKeys.filter(k=>FIELD_META[k].group===activeGroup);
+  const hwDiff=selA&&selB&&buildHwLabel(selA.env)!=="—"&&buildHwLabel(selB.env)!=="—"&&buildHwLabel(selA.env)!==buildHwLabel(selB.env);
+
+  if (loading) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><Spinner/> 加载记录中...</div>;
+  if (records.length===0) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,fontSize:13}}>暂无记录，请先在「新增记录」中添加测试数据</div>;
+
+  return (
+    <div>
+      <div style={{fontSize:12,color:C.muted,marginBottom:10}}>点击卡片上的按钮分别选择基准版本和测试版本</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+        {records.map(rec=><RecordCard key={rec.id} rec={rec} onSelect={onSelect} selA={selA} selB={selB}/>)}
+      </div>
+
+      {hwDiff&&<div style={{background:"#FAEEDA",color:"#854F0B",borderRadius:8,padding:"8px 14px",fontSize:12,marginBottom:10}}>⚠ 硬件环境不一致（{buildHwLabel(selA.env)} vs {buildHwLabel(selB.env)}），耗时类指标变化可能受硬件影响。</div>}
+
+      <div style={{display:"flex",gap:10,marginBottom:"1.5rem",alignItems:"flex-start",flexWrap:"wrap"}}>
+        <button onClick={compare} disabled={!selA||!selB}
+          style={{padding:"8px 24px",background:(!selA||!selB)?"#d3d1c7":C.text,color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:(!selA||!selB)?"not-allowed":"pointer"}}>
+          开始对比{selA&&selB?`：${buildLabel(selA.env)} vs ${buildLabel(selB.env)}`:""}
+        </button>
+        {result&&(
+          <button onClick={analyze} disabled={aiLoading}
+            style={{padding:"8px 24px",background:aiLoading?"#d3d1c7":"#185FA5",color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:aiLoading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:8}}>
+            {aiLoading&&<Spinner/>}{aiLoading?"AI 分析中...":"✦ AI 分析"}
+          </button>
+        )}
+      </div>
+
+      {(aiLoading||aiAnalysis)&&(
+        <div style={{background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,padding:"1.25rem",marginBottom:"1.5rem"}}>
+          <div style={{fontSize:13,fontWeight:500,marginBottom:10,color:"#185FA5"}}>✦ AI 分析报告</div>
+          {aiLoading&&<div style={{display:"flex",alignItems:"center",gap:10}}><div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:"#185FA5",animation:`bounce 1s ${i*.2}s infinite`,opacity:.7}}/>)}</div><span style={{fontSize:12,color:C.muted}}>{THINKING_STEPS[aiStep]}</span></div>}
+          {aiAnalysis&&<div style={{fontSize:13,lineHeight:1.8,color:C.text,whiteSpace:"pre-wrap"}}>{aiAnalysis}</div>}
+        </div>
+      )}
+
+      {result&&(
+        <>
+          <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+            {["全部",...GROUPS].map(g=>(
+              <button key={g} onClick={()=>setActiveGroup(g)} style={{padding:"4px 14px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:activeGroup===g?C.text:C.card,color:activeGroup===g?"#fff":C.muted,fontWeight:activeGroup===g?500:400}}>{g}</button>
+            ))}
+          </div>
+          <div style={{background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,overflow:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",minWidth:700}}>
+              <thead>
+                <tr style={{background:"#fafaf8"}}>
+                  {["指标","说明","分组",`${buildLabel(selA.env)}（基准）`,`${buildLabel(selB.env)}（测试）`,"变化量 / 变化率","评估"].map((h,i)=>(
+                    <th key={i} style={{fontSize:12,fontWeight:500,color:C.muted,padding:"9px 12px",borderBottom:"0.5px solid #ebebeb",textAlign:i>2?"right":"left",whiteSpace:"nowrap"}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredKeys.map((k,idx)=>{
+                  const meta=FIELD_META[k],va=result.a[k],vb=result.b[k];
+                  const both=va!=null&&vb!=null,delta=both?vb-va:null;
+                  const pct=both&&va!==0?delta/va*100:null;
+                  const tag=both&&delta!==null?evalTag(delta,meta):"neutral";
+                  return (
+                    <tr key={k} style={{borderBottom:idx===filteredKeys.length-1?"none":`0.5px solid ${C.sub}`}}>
+                      <td style={{padding:"8px 12px",fontFamily:"'SF Mono','Consolas',monospace",fontSize:12,color:C.code,whiteSpace:"nowrap"}}>{k}</td>
+                      <td style={{padding:"8px 12px",fontSize:13,whiteSpace:"nowrap"}}>{meta.label}{meta.unit&&<span style={{fontSize:11,color:C.code,marginLeft:3}}>({meta.unit})</span>}</td>
+                      <td style={{padding:"8px 12px",fontSize:11,color:C.muted}}>{meta.group}</td>
+                      <td style={{padding:"8px 12px",textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{va!=null?(Number.isInteger(va)?va.toLocaleString():va):<span style={{color:C.code}}>—</span>}</td>
+                      <td style={{padding:"8px 12px",textAlign:"right",fontVariantNumeric:"tabular-nums"}}>{vb!=null?(Number.isInteger(vb)?vb.toLocaleString():vb):<span style={{color:C.code}}>—</span>}</td>
+                      <DeltaCell delta={delta} pct={pct} good={meta.positiveIsGood}/>
+                      <td style={{padding:"8px 12px",textAlign:"right"}}><Tag type={tag}/></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{display:"flex",gap:16,marginTop:12,fontSize:12,color:C.muted}}>
+            <span><span style={{color:C.green,fontWeight:600}}>绿色</span> = 向好变化</span>
+            <span><span style={{color:C.red,fontWeight:600}}>红色</span> = 向差变化</span>
+            <span>灰色 = 中性指标</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Records Panel ──
+function RecordsPanel({ records, onDelete, loading }) {
+  if (loading) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><Spinner/> 加载中...</div>;
+  if (records.length===0) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,fontSize:13}}>暂无记录</div>;
+  return (
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
+      {records.map(rec=><RecordCard key={rec.id} rec={rec} onDelete={onDelete}/>)}
+    </div>
+  );
+}
+
+// ── Main App ──
+function App() {
+  const [tab, setTab] = useState("compare");
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState("");
+
+  const showToast = msg => { setToast(msg); setTimeout(()=>setToast(""),2500); };
+
+  const loadRecords = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`${WORKER_URL}/records`);
+      const data = await res.json();
+      setRecords(Array.isArray(data)?data:[]);
+    } catch(e){ showToast("加载失败："+e.message); }
+    setLoading(false);
+  };
+
+  useEffect(()=>{ loadRecords(); },[]);
+
+  const addRecord = async (payload) => {
+    const res = await fetch(`${WORKER_URL}/records`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+    setRecords(prev=>[d.record,...prev]);
+    showToast("✓ 记录保存成功");
+    setTab("compare");
+  };
+
+  const deleteRecord = async (id) => {
+    if (!confirm("确认删除该记录？")) return;
+    await fetch(`${WORKER_URL}/records/${id}`,{method:"DELETE"});
+    setRecords(prev=>prev.filter(r=>r.id!==id));
+    showToast("已删除");
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,padding:"1.5rem",color:C.text,fontSize:14}}>
+      <div style={{maxWidth:1100,margin:"0 auto"}}>
+        <div style={{marginBottom:"1.25rem"}}>
+          <h1 style={{fontSize:20,fontWeight:500,marginBottom:4}}>卸车数据集指标对比工具</h1>
+          <p style={{fontSize:12,color:C.muted}}>维护历史测试记录，随时选择任意两个版本进行指标对比分析</p>
+        </div>
+        <Tabs
+          tabs={[{id:"compare",label:`指标对比`},{id:"records",label:`记录管理（${records.length}）`},{id:"add",label:"＋ 新增记录"}]}
+          active={tab} onChange={setTab}
+        />
+        {tab==="compare"&&<ComparePanel records={records} loading={loading}/>}
+        {tab==="records"&&<RecordsPanel records={records} onDelete={deleteRecord} loading={loading}/>}
+        {tab==="add"&&<AddPanel onSave={addRecord}/>}
+      </div>
+      {toast&&(
+        <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:C.text,color:"#fff",padding:"8px 20px",borderRadius:8,fontSize:13,boxShadow:"0 4px 12px rgba(0,0,0,.15)",zIndex:999}}>
+          {toast}
+        </div>
+      )}
+      <style>{`@keyframes bounce{0%,80%,100%{transform:scale(.6);opacity:.4}40%{transform:scale(1);opacity:1}} @keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
