@@ -14,21 +14,16 @@ function json(data, status = 200) {
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
-
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // ── GET /records ── 获取所有记录
     if (path === "/records" && request.method === "GET") {
       try {
         const val = await env.UNLOAD_KV.get("records");
         return json(val ? JSON.parse(val) : []);
-      } catch (e) {
-        return json({ error: e.message }, 500);
-      }
+      } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // ── POST /records ── 新增记录
     if (path === "/records" && request.method === "POST") {
       try {
         const rec = await request.json();
@@ -42,30 +37,37 @@ export default {
         list.unshift(rec);
         await env.UNLOAD_KV.put("records", JSON.stringify(list));
         return json({ ok: true, record: rec });
-      } catch (e) {
-        return json({ error: e.message }, 500);
-      }
+      } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // ── DELETE /records/:id ── 删除记录
     if (path.startsWith("/records/") && request.method === "DELETE") {
       try {
         const id = path.split("/").pop();
         const val = await env.UNLOAD_KV.get("records");
         const list = val ? JSON.parse(val) : [];
-        const next = list.filter(r => r.id !== id);
-        await env.UNLOAD_KV.put("records", JSON.stringify(next));
+        await env.UNLOAD_KV.put("records", JSON.stringify(list.filter(r => r.id !== id)));
         return json({ ok: true });
-      } catch (e) {
-        return json({ error: e.message }, 500);
-      }
+      } catch (e) { return json({ error: e.message }, 500); }
     }
 
-    // ── POST /analyze ── AI 分析（转发 Anthropic API）
+    if (path.startsWith("/records/") && request.method === "PUT") {
+      try {
+        const id = path.split("/").pop();
+        const payload = await request.json();
+        const val = await env.UNLOAD_KV.get("records");
+        const list = val ? JSON.parse(val) : [];
+        const idx = list.findIndex(r => r.id === id);
+        if (idx === -1) return json({ error: "Not found" }, 404);
+        list[idx] = { ...list[idx], env: payload.env, data: payload.data, raw: payload.raw };
+        await env.UNLOAD_KV.put("records", JSON.stringify(list));
+        return json({ ok: true, record: list[idx] });
+      } catch (e) { return json({ error: e.message }, 500); }
+    }
+
     if (path === "/analyze" && request.method === "POST") {
       try {
         const body = await request.json();
-        const res = await fetch("https://api.anthropic.com/v1/messages", {
+        const res = await fetch("https://gateway.ai.cloudflare.com/v1/280bc6df57dfc9ad0f2856e3ce8512f9/unload-ai/anthropic/v1/messages", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -80,9 +82,7 @@ export default {
         });
         const data = await res.json();
         return json(data);
-      } catch (e) {
-        return json({ error: e.message }, 500);
-      }
+      } catch (e) { return json({ error: e.message }, 500); }
     }
 
     return json({ error: "Not found" }, 404);

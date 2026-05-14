@@ -23,7 +23,7 @@
 // ─────────────────────────────────────────────
 // ⚙️  配置：替换为你的 Cloudflare Worker 地址
 // ─────────────────────────────────────────────
-const WORKER_URL = "https://unload-compare.13140015504.workers.dev";
+const WORKER_URL = "https://unload-compare-frontend.pages.dev/api";
 
 const { useState, useCallback, useEffect } = React;
 
@@ -50,6 +50,8 @@ const FIELD_META = {
 };
 
 const GROUPS = ["基础","失败","耗时","超时","质量"];
+const ROBOT_OPTIONS = ["Rocky One","Rocky Pro"];
+const PLACE_OPTIONS = ["非指定位姿放置","指定位姿放置"];
 const CPU_OPTIONS = ["i9-13900K","i9-14900","自定义"];
 const GPU_OPTIONS = ["RTX 4060 Ti","RTX 5060","自定义"];
 const THINKING_STEPS = ["正在读取指标数据...","计算各项变化量...","识别关键改善与退步项...","生成综合分析报告..."];
@@ -60,16 +62,16 @@ function parseData(raw) {
   const lines = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
   for (let i = 0; i < lines.length - 1; i++) {
     const key = lines[i].replace(/-/g, "_");
+    if (key === "dataset_name") {
+      result._dataset = lines[i + 1].trim(); i++; continue;
+    }
     if (FIELD_META[key] !== undefined) {
       const num = parseFloat(lines[i + 1]);
       if (!isNaN(num)) { result[key] = num; i++; }
     }
   }
-  const full = raw.replace(/\n/g, " ");
-  const tm = full.match(/time[,\s]+([^\n,]+to[^\n,]+)/i);
+  const tm = raw.match(/^time[,\s]+(.+?\s+to\s+[\d\s:-]+)/im);
   if (tm) result._time = tm[1].trim();
-  const dn = full.match(/dataset_name[,\s]+([^\n,]+)/i);
-  if (dn) result._dataset = dn[1].trim();
   return result;
 }
 
@@ -144,31 +146,178 @@ function Tabs({ tabs, active, onChange }) {
   );
 }
 
-function RecordCard({ rec, onDelete, onSelect, selA, selB }) {
-  const isA = selA?.id===rec.id, isB = selB?.id===rec.id;
+
+
+function EditModal({ rec, onClose, onSave }) {
+  if (!rec) return null;
+  const [env, setEnv] = React.useState({...rec.env});
+  const [raw, setRaw] = React.useState(rec.raw||"");
+  const [saving, setSaving] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const set = (k,v) => setEnv(p=>({...p,[k]:v}));
+  const save = async () => {
+    const data = parseData(raw);
+    if (Object.keys(data).filter(k=>!k.startsWith("_")).length<3){setErr("数据解析失败，请检查格式");return;}
+    if (!env.maxVer&&!env.mapVer){setErr("请至少填写 Max 版本或标图版本");return;}
+    setSaving(true);
+    try { await onSave(rec.id, {env, data, raw}); onClose(); }
+    catch(e){ setErr("保存失败："+e.message); }
+    setSaving(false);
+  };
   return (
-    <div style={{background:C.card,border:`0.5px solid ${isA||isB?C.border:C.border}`,outline:isA?`2px solid #0F6E56`:isB?`2px solid #185FA5`:"none",borderRadius:10,padding:"12px 14px",position:"relative"}}>
-      <div style={{fontSize:13,fontWeight:500,marginBottom:6,paddingRight:onSelect?160:0}}>{buildLabel(rec.env)}</div>
-      <div style={{display:"grid",gridTemplateColumns:"52px 1fr",gap:"2px 8px",fontSize:12,color:C.muted}}>
-        {rec.env.cpu&&<><span>CPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.cpu}</span></>}
-        {rec.env.gpu&&<><span>GPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.gpu}</span></>}
-        {rec.env.maxVer&&<><span>Max</span><span style={{color:C.text,fontWeight:500}}>{rec.env.maxVer}</span></>}
-        {rec.env.mapVer&&<><span>标图</span><span style={{color:C.text,fontWeight:500}}>{rec.env.mapVer}</span></>}
-        {rec.data._time&&<><span>时间</span><span>{rec.data._time}</span></>}
-        <span>入库</span><span>{rec.savedAt}</span>
-      </div>
-      {onSelect&&(
-        <div style={{position:"absolute",top:10,right:10,display:"flex",gap:6}}>
-          <button onClick={()=>onSelect("A",rec)} style={{fontSize:11,padding:"2px 8px",borderRadius:4,border:`0.5px solid ${isA?"#0F6E56":C.border}`,background:isA?"#E1F5EE":C.card,color:isA?"#0F6E56":C.muted,cursor:"pointer",fontWeight:500}}>
-            {isA?"✓ 基准":"选为基准"}
-          </button>
-          <button onClick={()=>onSelect("B",rec)} style={{fontSize:11,padding:"2px 8px",borderRadius:4,border:`0.5px solid ${isB?"#185FA5":C.border}`,background:isB?"#E6F1FB":C.card,color:isB?"#185FA5":C.muted,cursor:"pointer",fontWeight:500}}>
-            {isB?"✓ 测试":"选为测试"}
+    <div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:C.card,borderRadius:12,padding:"1.5rem",maxWidth:520,width:"90%",maxHeight:"90vh",overflow:"auto"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontSize:14,fontWeight:500}}>编辑记录</div>
+          <button onClick={onClose} style={{fontSize:18,background:"none",border:"none",cursor:"pointer",color:C.muted,lineHeight:1}}>×</button>
+        </div>
+        <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6}}>机器人型号</div>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          {ROBOT_OPTIONS.map(r=>(
+            <button key={r} onClick={()=>set("robotModel",r)}
+              style={{padding:"5px 18px",borderRadius:6,border:`0.5px solid ${env.robotModel===r?C.text:C.border}`,background:env.robotModel===r?C.text:"#fafaf8",color:env.robotModel===r?"#fff":C.text,fontSize:12,cursor:"pointer",fontWeight:env.robotModel===r?500:400}}>
+              {r}
+            </button>
+          ))}
+        </div>
+        <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>放置类型</div>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          {PLACE_OPTIONS.map(p=>(
+            <button key={p} onClick={()=>set("placeType",p)}
+              style={{padding:"5px 18px",borderRadius:6,border:`0.5px solid ${env.placeType===p?C.text:C.border}`,background:env.placeType===p?C.text:"#fafaf8",color:env.placeType===p?"#fff":C.text,fontSize:12,cursor:"pointer",fontWeight:env.placeType===p?500:400}}>
+              {p}
+            </button>
+          ))}
+        </div>
+        <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>硬件版本</div>
+        <div style={{display:"grid",gridTemplateColumns:"48px 1fr",alignItems:"center",gap:"6px 8px",marginBottom:12}}>
+          <span style={{fontSize:12,color:C.muted}}>CPU</span>
+          <SelectOrInput options={CPU_OPTIONS} value={env.cpu||""} onChange={v=>set("cpu",v)} placeholder="输入 CPU 型号"/>
+          <span style={{fontSize:12,color:C.muted}}>GPU</span>
+          <SelectOrInput options={GPU_OPTIONS} value={env.gpu||""} onChange={v=>set("gpu",v)} placeholder="输入 GPU 型号"/>
+        </div>
+        <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>软件版本</div>
+        <div style={{display:"grid",gridTemplateColumns:"60px 1fr",alignItems:"center",gap:"6px 8px",marginBottom:12}}>
+          <span style={{fontSize:12,color:C.muted}}>Max 版本</span>
+          <input value={env.maxVer||""} onChange={e=>set("maxVer",e.target.value)} placeholder="例：1.13.0 pre 52"
+            style={{fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,padding:"4px 8px",outline:"none",background:"#fafaf8",color:C.text,width:"100%"}}/>
+          <span style={{fontSize:12,color:C.muted}}>标图版本</span>
+          <input value={env.mapVer||""} onChange={e=>set("mapVer",e.target.value)} placeholder="例：20260422"
+            style={{fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,padding:"4px 8px",outline:"none",background:"#fafaf8",color:C.text,width:"100%"}}/>
+        </div>
+        <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>数据集结果</div>
+        <textarea value={raw} onChange={e=>setRaw(e.target.value)}
+          style={{width:"100%",height:130,fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:8,padding:"8px 10px",resize:"vertical",outline:"none",fontFamily:"'SF Mono','Consolas',monospace",lineHeight:1.6,color:C.text,background:"#fafaf8"}}/>
+        {raw&&(()=>{
+          const preview=parseData(raw);
+          const keys=Object.keys(preview).filter(k=>!k.startsWith("_"));
+          return keys.length>0?(
+            <div style={{marginTop:6,background:"#f1efe8",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:11,color:"#888780",marginBottom:4}}>已识别 {keys.length} 个指标{preview._time&&<span>，时间：{preview._time}</span>}{preview._dataset&&<span>，数据集：{preview._dataset}</span>}</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                {keys.map(k=><span key={k} style={{fontSize:11,padding:"1px 6px",borderRadius:3,background:"#EAF3DE",color:"#3B6D11"}}>{FIELD_META[k]?.label||k}</span>)}
+              </div>
+            </div>
+          ):<div style={{marginTop:6,fontSize:11,color:"#A32D2D"}}>未识别到有效指标，请检查格式</div>;
+        })()}
+        {err&&<div style={{fontSize:12,color:"#A32D2D",marginTop:6}}>{err}</div>}
+        <div style={{display:"flex",gap:8,marginTop:14,justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{padding:"7px 18px",fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,background:C.card,cursor:"pointer",color:C.muted}}>取消</button>
+          <button onClick={save} disabled={saving}
+            style={{padding:"7px 18px",fontSize:12,border:"none",borderRadius:6,background:saving?"#d3d1c7":C.text,color:"#fff",cursor:saving?"not-allowed":"pointer",fontWeight:500,display:"flex",alignItems:"center",gap:6}}>
+            {saving&&<span style={{width:12,height:12,border:"2px solid rgba(255,255,255,0.3)",borderTop:"2px solid #fff",borderRadius:"50%",animation:"spin 0.8s linear infinite",display:"inline-block"}}/>}
+            {saving?"保存中...":"保存修改"}
           </button>
         </div>
-      )}
-      {onDelete&&<button onClick={()=>onDelete(rec.id)} style={{marginTop:8,fontSize:11,color:"#A32D2D",background:"none",border:"none",cursor:"pointer",padding:0}}>删除</button>}
+      </div>
     </div>
+  );
+}
+
+function DataModal({ rec, onClose }) {
+  if (!rec) return null;
+  return (
+    <div style={{position:"fixed",top:0,left:0,width:"100%",height:"100%",background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div style={{background:C.card,borderRadius:12,padding:"1.5rem",maxWidth:600,width:"90%",maxHeight:"80vh",overflow:"auto",position:"relative"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:14,fontWeight:500}}>{buildLabel(rec.env)}{rec.env.robotModel&&<span style={{marginLeft:8,fontSize:11,padding:"2px 9px",borderRadius:10,background:rec.env.robotModel==="Rocky One"?"#185FA5":"#534AB7",color:"#fff",fontWeight:500,letterSpacing:"0.3px"}}>{rec.env.robotModel}</span>}{rec.env.placeType&&<span style={{marginLeft:4,fontSize:11,padding:"2px 9px",borderRadius:10,background:rec.env.placeType==="非指定位姿放置"?"#EAF3DE":"#FAEEDA",color:rec.env.placeType==="非指定位姿放置"?"#3B6D11":"#854F0B",fontWeight:500}}>{rec.env.placeType}</span>}</div>
+          <button onClick={onClose} style={{fontSize:18,background:"none",border:"none",cursor:"pointer",color:C.muted,lineHeight:1}}>×</button>
+        </div>
+        <div style={{fontSize:12,color:C.muted,marginBottom:10,display:"grid",gridTemplateColumns:"60px 1fr",gap:"3px 8px"}}>
+          {rec.env.cpu&&<><span>CPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.cpu}</span></>}
+          {rec.env.gpu&&<><span>GPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.gpu}</span></>}
+          {rec.env.maxVer&&<><span>Max</span><span style={{color:C.text,fontWeight:500}}>{rec.env.maxVer}</span></>}
+          {rec.env.mapVer&&<><span>标图</span><span style={{color:C.text,fontWeight:500}}>{rec.env.mapVer}</span></>}
+          {rec.data._dataset&&<><span>数据集</span><span style={{color:C.text,fontSize:11}}>{rec.data._dataset}</span></>}
+          {rec.data._time&&<><span>时间</span><span>{rec.data._time}</span></>}
+          <span>入库</span><span>{rec.savedAt}</span>
+        </div>
+        <div style={{borderTop:`0.5px solid ${C.border}`,paddingTop:10,marginBottom:10}}>
+          <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:8}}>指标数据</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 16px"}}>
+            {Object.entries(FIELD_META).map(([k,meta])=>{
+              const v=rec.data[k];
+              if(v==null) return null;
+              return (
+                <div key={k} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0",borderBottom:`0.5px solid ${C.sub}`}}>
+                  <span style={{color:C.muted}}>{meta.label}{meta.unit&&<span style={{fontSize:10,marginLeft:2}}>({meta.unit})</span>}</span>
+                  <span style={{fontWeight:500,fontVariantNumeric:"tabular-nums"}}>{Number.isInteger(v)?v.toLocaleString():v}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{borderTop:`0.5px solid ${C.border}`,paddingTop:10}}>
+          <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6}}>原始数据</div>
+          <pre style={{fontSize:11,background:C.sub,padding:"8px 10px",borderRadius:6,overflow:"auto",maxHeight:160,lineHeight:1.6,color:C.text}}>{rec.raw}</pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecordCard({ rec, onDelete, onEdit, onSelect, selA, selB }) {
+  const isA = selA?.id===rec.id, isB = selB?.id===rec.id;
+  const [showModal, setShowModal] = React.useState(false);
+  const [showEdit, setShowEdit] = React.useState(false);
+  const handleDelete = () => {
+    const pwd = prompt("请输入删除密码：");
+    if (pwd === null) return;
+    if (pwd !== "robot2018sh") { alert("密码错误，无权删除"); return; }
+    onDelete(rec.id);
+  };
+  return (
+    <>
+      {showModal&&<DataModal rec={rec} onClose={()=>setShowModal(false)}/>}
+      {showEdit&&<EditModal rec={rec} onClose={()=>setShowEdit(false)} onSave={onEdit}/>}
+      <div style={{background:C.card,border:`0.5px solid ${isA||isB?C.border:C.border}`,outline:isA?`2px solid #0F6E56`:isB?`2px solid #185FA5`:"none",borderRadius:10,padding:"12px 14px",position:"relative"}}>
+        <div style={{fontSize:13,fontWeight:500,marginBottom:6,paddingRight:onSelect?160:0}}>{buildLabel(rec.env)}{rec.env.robotModel&&<span style={{marginLeft:8,fontSize:11,padding:"2px 9px",borderRadius:10,background:rec.env.robotModel==="Rocky One"?"#185FA5":"#534AB7",color:"#fff",fontWeight:500,letterSpacing:"0.3px"}}>{rec.env.robotModel}</span>}{rec.env.placeType&&<span style={{marginLeft:4,fontSize:11,padding:"2px 9px",borderRadius:10,background:rec.env.placeType==="非指定位姿放置"?"#EAF3DE":"#FAEEDA",color:rec.env.placeType==="非指定位姿放置"?"#3B6D11":"#854F0B",fontWeight:500}}>{rec.env.placeType}</span>}</div>
+        <div style={{display:"grid",gridTemplateColumns:"52px 1fr",gap:"2px 8px",fontSize:12,color:C.muted}}>
+          {rec.env.cpu&&<><span>CPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.cpu}</span></>}
+          {rec.env.gpu&&<><span>GPU</span><span style={{color:C.text,fontWeight:500}}>{rec.env.gpu}</span></>}
+          {rec.env.maxVer&&<><span>Max</span><span style={{color:C.text,fontWeight:500}}>{rec.env.maxVer}</span></>}
+          {rec.env.mapVer&&<><span>标图</span><span style={{color:C.text,fontWeight:500}}>{rec.env.mapVer}</span></>}
+          {rec.data._dataset&&<><span>数据集</span><span style={{color:C.text,fontSize:11}}>{rec.data._dataset}</span></>}
+          {rec.data._time&&<><span>时间</span><span>{rec.data._time}</span></>}
+          <span>入库</span><span>{rec.savedAt}</span>
+        </div>
+        {onSelect&&(
+          <div style={{position:"absolute",top:10,right:10,display:"flex",gap:6}}>
+            <button onClick={()=>onSelect("A",isA?null:rec)} style={{fontSize:11,padding:"2px 10px",borderRadius:4,border:`0.5px solid ${isA?"#0F6E56":C.border}`,background:isA?"#E1F5EE":C.card,color:isA?"#0F6E56":C.muted,cursor:"pointer",fontWeight:500}}>
+              {isA?"✓ 基准":"选为基准"}
+            </button>
+            <button onClick={()=>onSelect("B",isB?null:rec)} style={{fontSize:11,padding:"2px 10px",borderRadius:4,border:`0.5px solid ${isB?"#185FA5":C.border}`,background:isB?"#E6F1FB":C.card,color:isB?"#185FA5":C.muted,cursor:"pointer",fontWeight:500}}>
+              {isB?"✓ 测试":"选为测试"}
+            </button>
+          </div>
+        )}
+        <div style={{display:"flex",gap:12,marginTop:8,alignItems:"center"}}>
+          <button onClick={()=>setShowModal(true)} style={{fontSize:11,color:"#185FA5",background:"#E6F1FB",border:"0.5px solid #185FA5",cursor:"pointer",padding:"2px 10px",borderRadius:4,fontWeight:500}}>查看指标</button>
+          {onEdit&&<button onClick={()=>setShowEdit(true)} style={{fontSize:11,color:"#3B6D11",background:"none",border:"none",cursor:"pointer",padding:0}}>编辑</button>}
+          {onDelete&&<button onClick={handleDelete} style={{fontSize:11,color:"#A32D2D",background:"none",border:"none",cursor:"pointer",padding:0}}>删除</button>}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -178,7 +327,7 @@ function Spinner() {
 
 // ── Add Panel ──
 function AddPanel({ onSave }) {
-  const [env, setEnv] = useState({cpu:"",gpu:"",maxVer:"",mapVer:""});
+  const [env, setEnv] = useState({robotModel:"Rocky One",placeType:"非指定位姿放置",cpu:"",gpu:"",maxVer:"",mapVer:""});
   const [raw, setRaw] = useState("");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
@@ -194,14 +343,32 @@ function AddPanel({ onSave }) {
     setErr(""); setSaving(true);
     try {
       await onSave({env,data,raw});
-      setEnv({cpu:"",gpu:"",maxVer:"",mapVer:""}); setRaw("");
+      setEnv({robotModel:"Rocky One",placeType:"非指定位姿放置",cpu:"",gpu:"",maxVer:"",mapVer:""}); setRaw("");
     } catch(e){setErr("保存失败："+e.message);}
     setSaving(false);
   };
   return (
     <div style={{background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,padding:"1.25rem",maxWidth:560}}>
       <div style={{fontSize:14,fontWeight:500,marginBottom:14}}>新增测试记录</div>
-      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6}}>硬件版本</div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6}}>机器人型号</div>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        {ROBOT_OPTIONS.map(r=>(
+          <button key={r} onClick={()=>set("robotModel",r)}
+            style={{padding:"5px 18px",borderRadius:6,border:`0.5px solid ${env.robotModel===r?C.text:C.border}`,background:env.robotModel===r?C.text:"#fafaf8",color:env.robotModel===r?"#fff":C.text,fontSize:12,cursor:"pointer",fontWeight:env.robotModel===r?500:400}}>
+            {r}
+          </button>
+        ))}
+      </div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>放置类型</div>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        {PLACE_OPTIONS.map(p=>(
+          <button key={p} onClick={()=>set("placeType",p)}
+            style={{padding:"5px 18px",borderRadius:6,border:`0.5px solid ${env.placeType===p?C.text:C.border}`,background:env.placeType===p?C.text:"#fafaf8",color:env.placeType===p?"#fff":C.text,fontSize:12,cursor:"pointer",fontWeight:env.placeType===p?500:400}}>
+            {p}
+          </button>
+        ))}
+      </div>
+      <div style={{fontSize:12,fontWeight:500,color:C.muted,marginBottom:6,borderTop:`0.5px solid ${C.sub}`,paddingTop:10}}>硬件版本</div>
       <div style={{display:"grid",gridTemplateColumns:"48px 1fr",alignItems:"center",gap:"6px 8px",marginBottom:12}}>
         <span style={{fontSize:12,color:C.muted}}>CPU</span><SelectOrInput options={CPU_OPTIONS} value={env.cpu} onChange={v=>set("cpu",v)} placeholder="输入 CPU 型号"/>
         <span style={{fontSize:12,color:C.muted}}>GPU</span><SelectOrInput options={GPU_OPTIONS} value={env.gpu} onChange={v=>set("gpu",v)} placeholder="输入 GPU 型号"/>
@@ -215,6 +382,18 @@ function AddPanel({ onSave }) {
       <textarea value={raw} onChange={e=>setRaw(e.target.value)}
         placeholder={"粘贴数据集指标结果\ntime, 2026-04-22 ...\ntotal_num, 32682\n..."}
         style={{width:"100%",height:140,fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:8,padding:"8px 10px",resize:"vertical",outline:"none",fontFamily:"'SF Mono','Consolas',monospace",lineHeight:1.6,color:C.text,background:"#fafaf8"}}/>
+      {raw&&(()=>{
+        const preview=parseData(raw);
+        const keys=Object.keys(preview).filter(k=>!k.startsWith("_"));
+        return keys.length>0?(
+          <div style={{marginTop:8,background:"#f1efe8",borderRadius:6,padding:"8px 10px"}}>
+            <div style={{fontSize:11,color:"#888780",marginBottom:4}}>已识别 {keys.length} 个指标{preview._time&&<span>，时间：{preview._time}</span>}</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+              {keys.map(k=><span key={k} style={{fontSize:11,padding:"1px 6px",borderRadius:3,background:"#EAF3DE",color:"#3B6D11"}}>{FIELD_META[k]?.label||k}</span>)}
+            </div>
+          </div>
+        ):<div style={{marginTop:6,fontSize:11,color:"#A32D2D"}}>未识别到有效指标，请检查格式</div>;
+      })()}
       {err&&<div style={{fontSize:12,color:"#A32D2D",marginTop:6}}>{err}</div>}
       <button onClick={save} disabled={saving}
         style={{marginTop:12,padding:"8px 24px",background:saving?"#d3d1c7":C.text,color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:saving?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:8}}>
@@ -226,6 +405,8 @@ function AddPanel({ onSave }) {
 
 // ── Compare Panel ──
 function ComparePanel({ records, loading }) {
+  const [robotFilter, setRobotFilter] = useState("Rocky One");
+  const [placeFilter, setPlaceFilter] = useState("全部放置");
   const [selA, setSelA] = useState(null);
   const [selB, setSelB] = useState(null);
   const [result, setResult] = useState(null);
@@ -238,6 +419,7 @@ function ComparePanel({ records, loading }) {
     if (side==="A") setSelA(rec); else setSelB(rec);
     setResult(null); setAiAnalysis("");
   };
+  const reset = () => { setSelA(null); setSelB(null); setResult(null); setAiAnalysis(""); setActiveGroup("全部"); };
 
   const compare = () => { if(selA&&selB){setResult({a:selA.data,b:selB.data});setAiAnalysis("");} };
 
@@ -274,24 +456,37 @@ function ComparePanel({ records, loading }) {
 
   return (
     <div>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        {ROBOT_OPTIONS.map(r=>(
+          <button key={r} onClick={()=>{setRobotFilter(r);setPlaceFilter("全部放置");setSelA(null);setSelB(null);setResult(null);}}
+            style={{padding:"5px 20px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:robotFilter===r?C.text:C.card,color:robotFilter===r?"#fff":C.muted,fontWeight:robotFilter===r?500:400}}>
+            {r}（{records.filter(x=>x.env.robotModel===r).length}）
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+        {["全部放置",...PLACE_OPTIONS].map(p=>(
+          <button key={p} onClick={()=>{setPlaceFilter(p);setSelA(null);setSelB(null);setResult(null);}}
+            style={{padding:"4px 16px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:placeFilter===p?"#3B6D11":C.card,color:placeFilter===p?"#fff":C.muted,fontWeight:placeFilter===p?500:400}}>
+            {p==="全部放置"?"全部放置":p}
+          </button>
+        ))}
+      </div>
       <div style={{fontSize:12,color:C.muted,marginBottom:10}}>点击卡片上的按钮分别选择基准版本和测试版本</div>
       <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
-        {records.map(rec=><RecordCard key={rec.id} rec={rec} onSelect={onSelect} selA={selA} selB={selB}/>)}
+        {records.filter(r=>r.env.robotModel===robotFilter&&(placeFilter==="全部放置"||r.env.placeType===placeFilter)).map(rec=><RecordCard key={rec.id} rec={rec} onSelect={onSelect} selA={selA} selB={selB}/>)}
       </div>
 
       {hwDiff&&<div style={{background:"#FAEEDA",color:"#854F0B",borderRadius:8,padding:"8px 14px",fontSize:12,marginBottom:10}}>⚠ 硬件环境不一致（{buildHwLabel(selA.env)} vs {buildHwLabel(selB.env)}），耗时类指标变化可能受硬件影响。</div>}
 
-      <div style={{display:"flex",gap:10,marginBottom:"1.5rem",alignItems:"flex-start",flexWrap:"wrap"}}>
-        <button onClick={compare} disabled={!selA||!selB}
-          style={{padding:"8px 24px",background:(!selA||!selB)?"#d3d1c7":C.text,color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:(!selA||!selB)?"not-allowed":"pointer"}}>
-          开始对比{selA&&selB?`：${buildLabel(selA.env)} vs ${buildLabel(selB.env)}`:""}
+      <div style={{position:"fixed",right:80,top:"50%",transform:"translateY(-50%)",zIndex:100,display:"flex",flexDirection:"column",gap:8,alignItems:"center",width:160}}>
+        <button onClick={()=>{compare();setTimeout(()=>{const el=document.getElementById("compare-result");if(el)el.scrollIntoView({behavior:"smooth",block:"start"});},100);}} disabled={!selA||!selB}
+          style={{padding:"14px 20px",background:(!selA||!selB)?"#d3d1c7":C.text,color:"#fff",border:"none",borderRadius:12,fontSize:13,fontWeight:500,cursor:(!selA||!selB)?"not-allowed":"pointer",boxShadow:"0 4px 16px rgba(0,0,0,0.18)",width:"100%",textAlign:"center",lineHeight:1.6}}>
+          {selA&&selB?<>开始对比<br/><span style={{fontSize:11,opacity:.8,fontWeight:400}}>{buildLabel(selA.env)}<br/>vs<br/>{buildLabel(selB.env)}</span></>:"开始对比"}
         </button>
-        {result&&(
-          <button onClick={analyze} disabled={aiLoading}
-            style={{padding:"8px 24px",background:aiLoading?"#d3d1c7":"#185FA5",color:"#fff",border:"none",borderRadius:8,fontSize:13,fontWeight:500,cursor:aiLoading?"not-allowed":"pointer",display:"flex",alignItems:"center",gap:8}}>
-            {aiLoading&&<Spinner/>}{aiLoading?"AI 分析中...":"✦ AI 分析"}
-          </button>
-        )}
+        {selA&&<div style={{fontSize:11,padding:"7px 12px",background:"#E1F5EE",color:"#0F6E56",borderRadius:8,textAlign:"center",fontWeight:500,width:"100%"}}>✓ 基准<br/>{buildLabel(selA.env)}</div>}
+        {selB&&<div style={{fontSize:11,padding:"7px 12px",background:"#E6F1FB",color:"#185FA5",borderRadius:8,textAlign:"center",fontWeight:500,width:"100%"}}>✓ 测试<br/>{buildLabel(selB.env)}</div>}
+        {(selA||selB||result)&&<button onClick={reset} style={{fontSize:11,padding:"6px 0",borderRadius:8,border:`0.5px solid ${C.border}`,background:C.card,color:C.muted,cursor:"pointer",width:"100%",fontWeight:500}}>↺ 重置</button>}
       </div>
 
       {(aiLoading||aiAnalysis)&&(
@@ -303,7 +498,13 @@ function ComparePanel({ records, loading }) {
       )}
 
       {result&&(
-        <>
+        <div id="compare-result">
+          <div style={{textAlign:"center",padding:"20px 0 16px",marginBottom:16,borderTop:`2px solid ${C.border}`,position:"relative"}}>
+            <span style={{fontSize:18,fontWeight:500,letterSpacing:"0.05em",background:C.bg,padding:"0 20px",position:"relative",zIndex:1}}>
+              📊 指标对比结果
+            </span>
+            <div style={{position:"absolute",top:"50%",left:0,right:0,height:"0.5px",background:C.border,zIndex:0}}/>
+          </div>
           <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
             {["全部",...GROUPS].map(g=>(
               <button key={g} onClick={()=>setActiveGroup(g)} style={{padding:"4px 14px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:activeGroup===g?C.text:C.card,color:activeGroup===g?"#fff":C.muted,fontWeight:activeGroup===g?500:400}}>{g}</button>
@@ -344,19 +545,235 @@ function ComparePanel({ records, loading }) {
             <span><span style={{color:C.red,fontWeight:600}}>红色</span> = 向差变化</span>
             <span>灰色 = 中性指标</span>
           </div>
-        </>
+          <div style={{marginTop:20,background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,padding:"1.25rem"}}>
+            <div style={{fontSize:13,fontWeight:500,marginBottom:14}}>关键指标对比图</div>
+            {(()=>{
+              const chartKeys=["mf_fail_times","pp_fail_times","timeout_times","task_avg_time","pp_avg_time","avg_boxes_per_pick","is_multi_as_possible"];
+              const validKeys=chartKeys.filter(k=>result.a[k]!=null||result.b[k]!=null);
+              const maxVal=Math.max(...validKeys.map(k=>Math.max(result.a[k]||0,result.b[k]||0)),0.001);
+              return (
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  {validKeys.map(k=>{
+                    const meta=FIELD_META[k],va=result.a[k]||0,vb=result.b[k]||0;
+                    const barA=Math.max(va/maxVal*100,0.5),barB=Math.max(vb/maxVal*100,0.5);
+                    const delta=vb-va,good=delta!==0&&meta.pos!==null?(delta>0)===(meta.pos===true):null;
+                    const bColor=good===true?"#3B6D11":good===false?"#A32D2D":"#185FA5";
+                    return (
+                      <div key={k}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted,marginBottom:3}}>
+                          <span>{meta.label}{meta.unit&&` (${meta.unit})`}</span>
+                          <span style={{color:bColor,fontWeight:500}}>{delta>0?"+":""}{parseFloat(delta.toFixed(4))}</span>
+                        </div>
+                        <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:10,color:C.muted,width:28,textAlign:"right"}}>基准</span>
+                            <div style={{flex:1,background:"#f1efe8",borderRadius:2,height:14,position:"relative"}}>
+                              <div style={{width:`${barA}%`,height:"100%",background:"#888780",borderRadius:2,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:4}}>
+                                <span style={{fontSize:9,color:"#fff",whiteSpace:"nowrap"}}>{va}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontSize:10,color:C.muted,width:28,textAlign:"right"}}>测试</span>
+                            <div style={{flex:1,background:"#f1efe8",borderRadius:2,height:14,position:"relative"}}>
+                              <div style={{width:`${barB}%`,height:"100%",background:bColor,borderRadius:2,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:4}}>
+                                <span style={{fontSize:9,color:"#fff",whiteSpace:"nowrap"}}>{vb}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+          <div style={{marginTop:12,display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={()=>{
+              const headers=["指标","说明","分组",`${buildLabel(selA.env)}（基准）`,`${buildLabel(selB.env)}（测试）`,"变化量","变化率","评估"];
+              const rows=Object.entries(FIELD_META).map(([k,meta])=>{
+                const va=result.a[k],vb=result.b[k];
+                if(va==null&&vb==null) return null;
+                const delta=va!=null&&vb!=null?vb-va:null;
+                const pct=delta!==null&&va!==0?(delta/va*100).toFixed(1)+"%" :"—";
+                const tag=delta!==null&&meta.pos!==null?((delta>0)===(meta.pos===true)?"改善":"退步"):"持平";
+                return [k,meta.label,meta.group,va??"—",vb??"—",delta!=null?parseFloat(delta.toFixed(4)):"—",pct,tag].join(",");
+              }).filter(Boolean);
+              const csv=[headers.join(","),...rows].join("\n");
+              const a=document.createElement("a");
+              a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
+              a.download=`对比_${buildLabel(selA.env)}_vs_${buildLabel(selB.env)}.csv`;
+              a.click();
+            }} style={{padding:"6px 16px",fontSize:12,border:`0.5px solid ${C.border}`,borderRadius:6,background:C.card,cursor:"pointer",color:C.text}}>
+              导出 CSV
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Trend Panel ──
+function TrendPanel({ records, loading }) {
+  const [robotFilter, setRobotFilter] = React.useState("Rocky One");
+  const [placeFilter, setPlaceFilter] = React.useState("全部放置");
+  const [selectedKey, setSelectedKey] = React.useState("mf_fail_times");
+
+  if (loading) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><Spinner/> 加载中...</div>;
+  if (records.length===0) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,fontSize:13}}>暂无记录，请先添加测试数据</div>;
+
+  const filtered = records
+    .filter(r=>(r.env.robotModel===robotFilter)&&(placeFilter==="全部放置"||r.env.placeType===placeFilter))
+    .filter(r=>r.data[selectedKey]!=null)
+    .slice().reverse();
+
+  const meta = FIELD_META[selectedKey];
+  const values = filtered.map(r=>r.data[selectedKey]);
+  const minVal = Math.min(...values);
+  const maxVal = Math.max(...values);
+  const range = maxVal - minVal || 1;
+
+  const W = 680, H = 260, PL = 60, PR = 20, PT = 20, PB = 60;
+  const innerW = W - PL - PR, innerH = H - PT - PB;
+
+  const pts = filtered.map((r,i)=>({
+    x: PL + (filtered.length===1 ? innerW/2 : i/(filtered.length-1)*innerW),
+    y: PT + innerH - ((r.data[selectedKey]-minVal)/range)*innerH,
+    val: r.data[selectedKey],
+    label: buildLabel(r.env),
+  }));
+
+  const polyline = pts.map(p=>`${p.x},${p.y}`).join(" ");
+  const area = pts.length>1 ? `M${pts[0].x},${PT+innerH} `+pts.map(p=>`L${p.x},${p.y}`).join(" ")+` L${pts[pts.length-1].x},${PT+innerH} Z` : "";
+
+  // y轴刻度
+  const yTicks = [0,0.25,0.5,0.75,1].map(t=>({
+    y: PT + innerH - t*innerH,
+    val: (minVal + t*range).toFixed(range<1?3:range<10?2:0),
+  }));
+
+  const goodColor = meta.positiveIsGood===false?"#A32D2D":meta.positiveIsGood===true?"#3B6D11":"#185FA5";
+
+  return (
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+        {ROBOT_OPTIONS.map(r=>(
+          <button key={r} onClick={()=>setRobotFilter(r)}
+            style={{padding:"4px 16px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:robotFilter===r?C.text:C.card,color:robotFilter===r?"#fff":C.muted,fontWeight:robotFilter===r?500:400}}>
+            {r}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+        {["全部放置",...PLACE_OPTIONS].map(p=>(
+          <button key={p} onClick={()=>setPlaceFilter(p)}
+            style={{padding:"4px 16px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:placeFilter===p?"#3B6D11":C.card,color:placeFilter===p?"#fff":C.muted,fontWeight:placeFilter===p?500:400}}>
+            {p==="全部放置"?"全部放置":p}
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        {Object.entries(FIELD_META).map(([k,m])=>(
+          <button key={k} onClick={()=>setSelectedKey(k)}
+            style={{padding:"3px 12px",borderRadius:4,fontSize:11,border:`0.5px solid ${selectedKey===k?C.text:C.border}`,cursor:"pointer",background:selectedKey===k?C.text:C.card,color:selectedKey===k?"#fff":C.muted}}>
+            {m.label}
+          </button>
+        ))}
+      </div>
+      {filtered.length===0?(
+        <div style={{textAlign:"center",padding:"3rem",color:C.muted,fontSize:13}}>该筛选条件下暂无数据</div>
+      ):(
+        <div style={{background:C.card,border:`0.5px solid ${C.border}`,borderRadius:12,padding:"1.25rem"}}>
+          <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>{meta.label}{meta.unit&&<span style={{fontSize:11,color:C.muted,marginLeft:4}}>({meta.unit})</span>} 趋势</div>
+          <div style={{fontSize:11,color:C.muted,marginBottom:12}}>{robotFilter} · {placeFilter==="全部放置"?"全部放置类型":placeFilter} · {filtered.length} 个版本</div>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",overflow:"visible"}}>
+            {yTicks.map((t,i)=>(
+              <g key={i}>
+                <line x1={PL} y1={t.y} x2={W-PR} y2={t.y} stroke="#f1efe8" strokeWidth="1"/>
+                <text x={PL-6} y={t.y+4} textAnchor="end" fontSize="10" fill="#888780">{t.val}</text>
+              </g>
+            ))}
+            <line x1={PL} y1={PT} x2={PL} y2={PT+innerH} stroke="#d3d1c7" strokeWidth="0.5"/>
+            <line x1={PL} y1={PT+innerH} x2={W-PR} y2={PT+innerH} stroke="#d3d1c7" strokeWidth="0.5"/>
+            {area&&<path d={area} fill={goodColor} fillOpacity="0.08"/>}
+            {pts.length>1&&<polyline points={polyline} fill="none" stroke={goodColor} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>}
+            {pts.map((p,i)=>(
+              <g key={i}>
+                <circle cx={p.x} cy={p.y} r="4" fill={goodColor} stroke="#fff" strokeWidth="1.5"/>
+                <text x={p.x} y={p.y-10} textAnchor="middle" fontSize="10" fill={goodColor} fontWeight="500">{p.val}</text>
+                <text x={p.x} y={PT+innerH+16} textAnchor="middle" fontSize="9" fill="#888780" transform={`rotate(-30,${p.x},${PT+innerH+16})`}>{p.label}</text>
+              </g>
+            ))}
+          </svg>
+          <div style={{marginTop:12,overflow:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead>
+                <tr style={{background:"#fafaf8"}}>
+                  {["版本","数据集","放置类型","时间",meta.label+(meta.unit?` (${meta.unit})` :""),"环比变化"].map((h,i)=>(
+                    <th key={i} style={{padding:"6px 10px",fontSize:11,fontWeight:500,color:C.muted,borderBottom:`0.5px solid ${C.border}`,textAlign:i>3?"right":"left",whiteSpace:"nowrap"}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r,i)=>{
+                  const val=r.data[selectedKey];
+                  const prev=filtered[i-1]?.data[selectedKey];
+                  const delta=prev!=null?val-prev:null;
+                  const pct=delta!=null&&prev!==0?(delta/prev*100).toFixed(1):null;
+                  const dColor=delta===null?"":((delta>0)===(meta.positiveIsGood===true)?"#3B6D11":delta===0?"#888780":"#A32D2D");
+                  return (
+                    <tr key={r.id} style={{borderBottom:`0.5px solid ${C.sub}`}}>
+                      <td style={{padding:"6px 10px",fontWeight:500}}>{buildLabel(r.env)}</td>
+                      <td style={{padding:"6px 10px",fontSize:11,color:C.muted}}>{r.data._dataset||"—"}</td>
+                      <td style={{padding:"6px 10px"}}>{r.env.placeType&&<span style={{fontSize:11,padding:"1px 6px",borderRadius:3,background:r.env.placeType==="非指定位姿放置"?"#EAF3DE":"#FAEEDA",color:r.env.placeType==="非指定位姿放置"?"#3B6D11":"#854F0B"}}>{r.env.placeType}</span>}</td>
+                      <td style={{padding:"6px 10px",fontSize:11,color:C.muted,whiteSpace:"nowrap"}}>{r.data._time||"—"}</td>
+                      <td style={{padding:"6px 10px",textAlign:"right",fontWeight:500,fontVariantNumeric:"tabular-nums"}}>{val}</td>
+                      <td style={{padding:"6px 10px",textAlign:"right",color:dColor,fontWeight:500,fontVariantNumeric:"tabular-nums"}}>
+                        {delta===null?"首个版本":delta===0?"持平":`${delta>0?"+":""}${parseFloat(delta.toFixed(4))}${pct?` (${delta>0?"+":""}${pct}%)`:"" }`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
 // ── Records Panel ──
-function RecordsPanel({ records, onDelete, loading }) {
+function RecordsPanel({ records, onDelete, onEdit, loading }) {
+  const [filter, setFilter] = React.useState("全部");
+  const [placeFilter, setPlaceFilter] = React.useState("全部放置");
   if (loading) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}><Spinner/> 加载中...</div>;
   if (records.length===0) return <div style={{textAlign:"center",padding:"3rem",color:C.muted,fontSize:13}}>暂无记录</div>;
+  const filtered = records.filter(r=>(filter==="全部"||r.env.robotModel===filter)&&(placeFilter==="全部放置"||r.env.placeType===placeFilter));
   return (
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
-      {records.map(rec=><RecordCard key={rec.id} rec={rec} onDelete={onDelete}/>)}
+    <div>
+      <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+        {["全部",...ROBOT_OPTIONS].map(r=>(
+          <button key={r} onClick={()=>setFilter(r)}
+            style={{padding:"4px 16px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:filter===r?C.text:C.card,color:filter===r?"#fff":C.muted,fontWeight:filter===r?500:400}}>
+            {r}（{r==="全部"?records.length:records.filter(x=>x.env.robotModel===r).length}）
+          </button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+        {["全部放置",...PLACE_OPTIONS].map(p=>(
+          <button key={p} onClick={()=>setPlaceFilter(p)}
+            style={{padding:"4px 16px",borderRadius:20,fontSize:12,border:`0.5px solid ${C.border}`,cursor:"pointer",background:placeFilter===p?"#3B6D11":C.card,color:placeFilter===p?"#fff":C.muted,fontWeight:placeFilter===p?500:400}}>
+            {p==="全部放置"?"全部放置":p}（{p==="全部放置"?records.length:records.filter(x=>x.env.placeType===p).length}）
+          </button>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
+        {filtered.map(rec=><RecordCard key={rec.id} rec={rec} onDelete={onDelete} onEdit={onEdit}/>)}
+      </div>
     </div>
   );
 }
@@ -398,6 +815,14 @@ function App() {
     showToast("已删除");
   };
 
+  const updateRecord = async (id, payload) => {
+    const res = await fetch(`${WORKER_URL}/records/${id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+    setRecords(prev=>prev.map(r=>r.id===id?d.record:r));
+    showToast("✓ 记录已更新");
+  };
+
   return (
     <div style={{minHeight:"100vh",background:C.bg,padding:"1.5rem",color:C.text,fontSize:14}}>
       <div style={{maxWidth:1100,margin:"0 auto"}}>
@@ -406,11 +831,12 @@ function App() {
           <p style={{fontSize:12,color:C.muted}}>维护历史测试记录，随时选择任意两个版本进行指标对比分析</p>
         </div>
         <Tabs
-          tabs={[{id:"compare",label:`指标对比`},{id:"records",label:`记录管理（${records.length}）`},{id:"add",label:"＋ 新增记录"}]}
+          tabs={[{id:"compare",label:`指标对比`},{id:"trend",label:`趋势图`},{id:"records",label:`记录管理（${records.length}）`},{id:"add",label:"＋ 新增记录"}]}
           active={tab} onChange={setTab}
         />
         {tab==="compare"&&<ComparePanel records={records} loading={loading}/>}
-        {tab==="records"&&<RecordsPanel records={records} onDelete={deleteRecord} loading={loading}/>}
+        {tab==="trend"&&<TrendPanel records={records} loading={loading}/>}
+        {tab==="records"&&<RecordsPanel records={records} onDelete={deleteRecord} onEdit={updateRecord} loading={loading}/>}
         {tab==="add"&&<AddPanel onSave={addRecord}/>}
       </div>
       {toast&&(
